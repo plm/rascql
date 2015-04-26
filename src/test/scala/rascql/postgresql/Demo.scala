@@ -42,18 +42,18 @@ object Demo extends App with DefaultParameterEncoders with DefaultColumnDecoders
   import system.dispatcher
   import GraphDSL.Implicits._
 
-  val queries = Source(List(
+  val queries = Source.fromIterator(() => Iterator.from(1).flatMap { i => List(
     SendQuery(
       """BEGIN;
         |SELECT usename FROM pg_stat_activity;
         |COMMIT""".stripMargin
     ),
     SendQuery.Prepared(
-      "SELECT usename FROM pg_stat_activity WHERE usename = $1 LIMIT $2",
+      "SELECT usename AS usename" + i + " FROM pg_stat_activity WHERE usename = $1 LIMIT $2",
       username,
       1
     )
-  ))
+  )})
 
   val startup = BidiFlow.fromGraph(GraphDSL.create() { implicit b =>
     val concat = b.add(Concat[FrontendMessage]())
@@ -79,6 +79,7 @@ object Demo extends App with DefaultParameterEncoders with DefaultColumnDecoders
 
   val (_, count) =
     QueryExecution().
+      atop(PreparedStatementCache(5)).
       atop(AsyncOperations(Sink.foreach(println))).
       atop(startup).
       atop(Codec(charset)).
