@@ -18,7 +18,9 @@ package rascql.postgresql.stream
 
 import akka.actor.ActorSystem
 import akka.stream.ActorMaterializer
-import akka.testkit.TestKitBase
+import akka.stream.scaladsl._
+import akka.stream.testkit._
+import akka.testkit._
 import org.scalatest._
 
 /**
@@ -33,5 +35,29 @@ private[stream] trait StreamSpec extends TestKitBase with WordSpecLike with Befo
   implicit lazy val materializer = ActorMaterializer()
 
   override protected def afterAll() = system.shutdown()
+
+  type PubProbe[T] = TestPublisher.ManualProbe[T]
+  type SubProbe[T] = TestSubscriber.ManualProbe[T]
+
+  def flow[In, Out](flow: Flow[In, Out, _])(fn: (PubProbe[In], SubProbe[Out]) => Unit): Unit = {
+    val src = TestPublisher.manualProbe[In]()
+    val sink = TestSubscriber.manualProbe[Out]()
+
+    Source.fromPublisher(src).via(flow).runWith(Sink.fromSubscriber(sink))
+
+    fn(src, sink)
+  }
+
+  def bidi[I1, O1, I2, O2](bidi: BidiFlow[I1, O1, I2, O2, _])(fn: (PubProbe[I1], SubProbe[O1], PubProbe[I2], SubProbe[O2]) => Unit): Unit = {
+    val lsrc = TestPublisher.manualProbe[I1]()
+    val rsink = TestSubscriber.manualProbe[O1]()
+    val rsrc = TestPublisher.manualProbe[I2]()
+    val lsink = TestSubscriber.manualProbe[O2]()
+
+    bidi.join(Flow.fromSinkAndSourceMat(Sink.fromSubscriber(rsink), Source.fromPublisher(rsrc))(Keep.none)).
+      runWith(Source.fromPublisher(lsrc), Sink.fromSubscriber(lsink))
+
+    fn(lsrc, rsink, rsrc, lsink)
+  }
 
 }

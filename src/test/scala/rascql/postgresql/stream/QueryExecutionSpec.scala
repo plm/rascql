@@ -29,32 +29,6 @@ import org.scalatest.MustMatchers
  */
 class QueryExecutionSpec extends StreamSpec with MustMatchers {
 
-  type PubProbe[T] = TestPublisher.ManualProbe[T]
-  type SubProbe[T] = TestSubscriber.ManualProbe[T]
-
-  def flow[In, Out](flow: Flow[In, Out, _])(fn: (PubProbe[In], SubProbe[Out]) => Unit): Unit = {
-    val src = TestPublisher.manualProbe[In]()
-    val sink = TestSubscriber.manualProbe[Out]()
-
-    Source.fromPublisher(src).
-      via(flow).
-      runWith(Sink.fromSubscriber(sink))
-
-    fn(src, sink)
-  }
-
-  def bidi[I1, O1, I2, O2](bidi: BidiFlow[I1, O1, I2, O2, _])(fn: (PubProbe[I1], SubProbe[O1], PubProbe[I2], SubProbe[O2]) => Unit): Unit = {
-    val lsrc = TestPublisher.manualProbe[I1]()
-    val rsink = TestSubscriber.manualProbe[O1]()
-    val rsrc = TestPublisher.manualProbe[I2]()
-    val lsink = TestSubscriber.manualProbe[O2]()
-
-    bidi.join(Flow.fromSinkAndSourceMat(Sink.fromSubscriber(rsink), Source.fromPublisher(rsrc))(Keep.none)).
-      runWith(Source.fromPublisher(lsrc), Sink.fromSubscriber(lsink))
-
-    fn(lsrc, rsink, rsrc, lsink)
-  }
-
   "A send query stage" should {
 
     import PreparedStatement.{Unnamed => Stmt}
