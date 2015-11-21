@@ -40,21 +40,14 @@ import rascql.postgresql.protocol._
  *                      .                                                                                   v           .
  *                      .                           +---------------+       +---------------+       +------[i]------+   .
  *                      .                           |               |       |               |       |               |   .
- *           SendQuery --------------------------> [i]     zip     [o] --> [i]   queries   [o] --> [i]   concat    [o] --> FrontendMessage
+ *           SendQuery --------------------------> [i]             [o] --> [i]   queries   [o] --> [i]   concat    [o] --> FrontendMessage
  *                      .                           |               |       |               |       |               |   .
- *                      .                           +------[i]------+       +---------------+       +---------------+   .
- *                      .                                   ^                                                           .
- *                      .                                   |                                                           .
- *                      .                           +------[o]------+                                                   .
- *                      .                           |               |                                                   .
- *                      .                           |    tokens     |                                                  .
- *                      .                           |               |                                                   .
- *                      .                           +------[i]------+                                                   .
- *                      .                                   |                                                           .
- *                      .                                   |                                                           .
- *                      .   +---------------+       +------[o]------+                                                   .
+ *                      .                           |               |       +---------------+       +---------------+   .
+ *                      .                           |     query     |                                                   .
+ *                      .                           |     cycle     |                                                   .
+ *                      .   +---------------+       |               |                                                   .
  *                      .   |               |       |               |                                                   .
- * Source[QueryResult] <-- [o]   results   [i] <-- [o]  broadcast  [i] <-------------------------------------------------- BackendMessage
+ * Source[QueryResult] <-- [o]   results   [i] <-- [o]             [i] <-------------------------------------------------- BackendMessage
  *                      .   |               |       |               |                                                   .
  *                      .   +---------------+       +---------------+                                                   .
  *                      .                                                                                               .
@@ -69,43 +62,22 @@ object QueryExecution {
   def apply(): BidiFlow[SendQuery, FrontendMessage, BackendMessage, Source[QueryResult, Unit], Unit] =
     BidiFlow.fromGraph(GraphDSL.create() { implicit b =>
 
-      // Don't allow executing the next statement unless we've seen the prior statement complete
-      // Match statement with a token to before processing the statement
-      val zip = b.add(ZipWith[Any, SendQuery, SendQuery](Keep.right))
-      val tokens = b.add(Flow[BackendMessage].collect { case rfq: ReadyForQuery => rfq })
-      val broadcast = b.add(Broadcast[BackendMessage](2, eagerCancel = false))
+      val qc = b.add(new QueryCycle)
       val concat = b.add(Concat[FrontendMessage]())
       val queries = b.add(Flow[SendQuery].transform(() => new SendQueryStage))
       val terminate = b.add(Source.single(Terminate))
-      // Group the messages into vectors of at most two elements, and then
-      // split into a new sub-stream only when we have ReadyForQuery followed
-      // by another message. The RFQ is published to the existing sub-stream
-      // rather than the new one, so no messages are lost.
       val results = b.add(Flow[BackendMessage].
-        drop(1). // Drop initial RFQ(Idle)
-        scan(Vector.empty[BackendMessage]) {
-          case (_ :+ prev, msg) => Vector(prev, msg)
-          case (prev, msg) => prev :+ msg // Single-element or empty vector
-        }.
-        drop(1). // Drop initial empty Vector
-        splitWhen {
-          case Vector(_: ReadyForQuery, msg) => true
-          case _ => false
-        }.collect {
-          case _ :+ msg => msg // Only publish "current" message
-          case Vector(msg) => msg // The first message, will only match once
-        }.
+        splitAfter(_.isInstanceOf[ReadyForQuery]).
         transform(() => new QueryResultStage).
-        prefixAndTail(0). // Convert SubFlow to Source
+        prefixAndTail(0).
         map(_._2).
         concatSubstreams)
 
-      broadcast ~> results
-      broadcast ~> tokens ~> zip.in0
-                             zip.out ~> queries ~> concat
-                             terminate          ~> concat
+      qc.out1 ~> queries ~> concat
+               terminate ~> concat
+      qc.out2 ~> results
 
-      BidiShape(zip.in1, concat.out, broadcast.in, results.out)
+      BidiShape(qc.in1, concat.out, qc.in2, results.outlet)
     } named("QueryExecution"))
 
 }
